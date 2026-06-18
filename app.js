@@ -11,8 +11,7 @@ import {
     serverTimestamp,
     setDoc,
     where,
-    writeBatch,
-    deleteDoc
+    writeBatch
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 
 // Cole aqui as credenciais do seu projeto Firebase.
@@ -95,8 +94,6 @@ const state = {
     results: new Map()
 };
 
-// Admin state will be attached here later
-
 const flags = {
     "Algeria": "🇩🇿", "Argentina": "🇦🇷", "Australia": "🇦🇺", "Austria": "🇦🇹", "Belgium": "🇧🇪",
     "Bosnia-Herzegovina": "🇧🇦", "Brazil": "🇧🇷", "Canada": "🇨🇦", "Cape Verde Islands": "🇨🇻",
@@ -149,35 +146,7 @@ const els = {
     totalResults: document.getElementById("totalResults"),
     groupPassword: document.getElementById("groupPassword"), // <--- NOVO
     btnEnterGroup: document.getElementById("btnEnterGroup"), // <--- NOVO
-    saveFab: document.getElementById("saveFab"),
-};
-
-// Admin-specific DOM refs (not guaranteed to exist until HTML loaded)
-const adminEls = {
-    overviewBody: document.getElementById('adminOverviewBody'),
-    groupsBody: document.getElementById('adminGroupsBody'),
-    participantsGroupFilter: document.getElementById('adminParticipantsGroupFilter'),
-    participantsBody: document.getElementById('adminParticipantsBody'),
-    predictionsGroupFilter: document.getElementById('adminPredictionsGroupFilter'),
-    predictionsBody: document.getElementById('adminPredictionsBody'),
-    resultsBody: document.getElementById('adminResultsBody'),
-    publishResultsBtn: document.getElementById('adminPublishResults'),
-    selectAllResultsBtn: document.getElementById('adminSelectAllResults'),
-    undoPublishBtn: document.getElementById('adminUndoPublish'),
-    exportCSVBtn: document.getElementById('adminExportCSV'),
-    refreshGroupsBtn: document.getElementById('adminRefreshGroups'),
-    refreshParticipantsBtn: document.getElementById('adminRefreshParticipants'),
-    refreshPredictionsBtn: document.getElementById('adminRefreshPredictions'),
-    toast: document.getElementById('adminToast')
-};
-
-// Initialize admin state container
-state.admin = {
-    selectedGroupId: null,
-    drafts: new Map(), // matchId -> { homeGoals, awayGoals, before, selected }
-    predictionsCache: [],
-    lastPublishForUndo: null,
-    undoTimer: null
+    loadingOverlay: document.getElementById("loadingOverlay"),
 };
 
 start();
@@ -197,7 +166,6 @@ function start() {
     renderGames();
     renderAdminResults();
     bindEvents();
-    setupAdminBindings();
 
     if (!isFirebaseConfigured(firebaseConfig)) {
         setConnection("Configure o Firebase");
@@ -211,13 +179,6 @@ function start() {
         
         // Carrega APENAS os resultados oficiais, pois são globais
         listenToResults(); 
-
-        // After DB is available, populate admin data
-        loadAdminOverview().catch(handleFirebaseError);
-        loadGroups().catch(handleFirebaseError);
-        loadParticipants().catch(handleFirebaseError);
-        loadPredictions().catch(handleFirebaseError);
-        loadResultsForAdmin().catch(handleFirebaseError);
     } catch (error) {
         console.error(error);
         setConnection("Erro no Firebase");
@@ -243,214 +204,477 @@ function bindEvents() {
     els.adminOpen.addEventListener("click", () => els.adminDialog.showModal());
     els.adminUnlock.addEventListener("click", unlockAdmin);
     els.recalculateRanking.addEventListener("click", () => recalculateRanking().catch(handleFirebaseError));
+}
 
-    // FAB behavior: submit the form (use requestSubmit when available to preserve form validation)
-    if (els.saveFab) {
-        els.saveFab.addEventListener("click", () => {
-            const form = els.bolaoForm || document.getElementById('bolaoForm');
-            if (!form) return;
-            if (typeof form.requestSubmit === 'function') {
-                form.requestSubmit();
-            } else {
-                form.submit();
-            }
+function listenToResults() {
+    if (!state.db) return;
+
+    state.unsubscribeResults = onSnapshot(
+        collection(state.db, "resultados"),
+        (snapshot) => {
+            state.results = new Map(snapshot.docs.map((item) => [Number(item.data().matchId), item.data()]));
+            els.totalResults.textContent = String(snapshot.size);
+            fillAdminResults();
+            renderResultsBoard();
+        },
+        handleFirebaseError
+    );
+}
+
+async function savePredictions(event) {
+    event.preventDefault();
+    const submitButton = els.bolaoForm.querySelector("button[type='submit']");
+
+    if (!state.db) {
+        showPreviewMessage("Configure o Firebase no topo do app.js antes de salvar.");
+        return;
+    }
+
+    if (!els.participantName.value.trim()) {
+        els.participantName.focus();
+        showPreviewMessage("Digite o nome do participante para salvar os palpites.");
+        return;
+    }
+
+    submitButton.disabled = true;
+    submitButton.textContent = "Salvando...";
+
+    try {
+        await handleParticipantName();
+
+        const predictions = collectPredictions();
+
+        if (!predictions.length) {
+            showPreviewMessage("Preencha pelo menos um placar antes de salvar.");
+            setConnection("Nada para salvar");
+            return;
+        }
+
+        const batch = writeBatch(state.db);
+
+        predictions.forEach((prediction) => {
+            const predictionRef = doc(collection(state.db, "palpites"), `${state.participantId}_${prediction.matchId}`);
+            batch.set(predictionRef, {
+                ...prediction,
+                participanteId: state.participantId,
+                groupId: state.groupId, // Chave do grupo adicionada
+                savedAt: serverTimestamp()
+            }, { merge: true });
         });
+
+        await batch.commit();
+        updateSavedPreview(predictions);
+        setConnection("Palpites salvos");
+    } catch (error) {
+        handleFirebaseError(error);
+    } finally {
+        submitButton.disabled = false;
+        submitButton.innerHTML = `<span aria-hidden="true">↗</span> Salvar palpites`;
     }
 }
 
-// --- Admin binding setup ---
-function setupAdminBindings() {
-    // Tab switching inside admin panel
-    document.querySelectorAll('.admin-tab-button').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('.admin-tab-button').forEach(b => b.classList.toggle('active', b === btn));
-            const tab = btn.dataset.tab;
-            document.querySelectorAll('.admin-section').forEach(sec => sec.classList.toggle('active', sec.id === `admin${capitalize(tab)}` || sec.id === tab || sec.id === `${tab}`));
-        });
-    });
-
-    if (adminEls.refreshGroupsBtn) adminEls.refreshGroupsBtn.addEventListener('click', () => loadGroups().catch(handleFirebaseError));
-    if (adminEls.refreshParticipantsBtn) adminEls.refreshParticipantsBtn.addEventListener('click', () => loadParticipants().catch(handleFirebaseError));
-    if (adminEls.refreshPredictionsBtn) adminEls.refreshPredictionsBtn.addEventListener('click', () => loadPredictions().catch(handleFirebaseError));
-
-    if (adminEls.exportCSVBtn) adminEls.exportCSVBtn.addEventListener('click', () => exportPredictionsCSV());
-    if (adminEls.selectAllResultsBtn) adminEls.selectAllResultsBtn.addEventListener('click', () => toggleSelectAllResults());
-    if (adminEls.publishResultsBtn) adminEls.publishResultsBtn.addEventListener('click', () => publishSelectedResults().catch(handleFirebaseError));
-    if (adminEls.undoPublishBtn) adminEls.undoPublishBtn.addEventListener('click', () => undoLastPublish().catch(handleFirebaseError));
-
-    if (adminEls.predictionsGroupFilter) adminEls.predictionsGroupFilter.addEventListener('change', () => loadPredictions().catch(handleFirebaseError));
-    if (adminEls.participantsGroupFilter) adminEls.participantsGroupFilter.addEventListener('change', () => loadParticipants().catch(handleFirebaseError));
+function collectPredictions() {
+    return matches
+        .filter((match) => match.status !== "FINISHED")
+        .map((match) => ({
+            matchId: match.id,
+            homeTeam: match.homeTeam,
+            awayTeam: match.awayTeam,
+            homeGoals: toScore(document.getElementById(`home-${match.id}`).value),
+            awayGoals: toScore(document.getElementById(`away-${match.id}`).value)
+        }))
+        .filter((prediction) => prediction.homeGoals !== null && prediction.awayGoals !== null);
 }
 
-// --- Admin data loaders and actions ---
-async function loadAdminOverview() {
-    if (!state.db || !adminEls.overviewBody) return;
-    adminEls.overviewBody.textContent = 'Carregando...';
+function fillPredictions(predictions) {
+    predictions.forEach((prediction) => {
+        const home = document.getElementById(`home-${prediction.matchId}`);
+        const away = document.getElementById(`away-${prediction.matchId}`);
 
-    const [groupsSnap, participantsSnap, predictionsSnap, resultsSnap] = await Promise.all([
-        getDocs(collection(state.db, 'grupos')),
-        getDocs(collection(state.db, 'participantes')),
-        getDocs(collection(state.db, 'palpites')),
-        getDocs(collection(state.db, 'resultados'))
+        if (home) home.value = prediction.homeGoals;
+        if (away) away.value = prediction.awayGoals;
+    });
+}
+
+function updateSavedPreview(predictions) {
+    if (!predictions.length) {
+        showPreviewMessage("Nenhum palpite salvo para este participante.");
+        return;
+    }
+
+    els.savedPredictions.textContent = JSON.stringify(
+        predictions.map(({ matchId, homeTeam, awayTeam, homeGoals, awayGoals }) => ({
+            matchId,
+            homeTeam,
+            awayTeam,
+            homeGoals,
+            awayGoals
+        })),
+        null,
+        2
+    );
+}
+
+function showPreviewMessage(message) {
+    els.savedPredictions.textContent = message;
+}
+
+async function saveResult(match) {
+    if (!state.db) return;
+
+    const homeGoals = toScore(document.getElementById(`result-home-${match.id}`).value);
+    const awayGoals = toScore(document.getElementById(`result-away-${match.id}`).value);
+
+    if (homeGoals === null || awayGoals === null) return;
+
+    try {
+        await setDoc(doc(collection(state.db, "resultados"), String(match.id)), {
+            matchId: match.id,
+            homeGoals,
+            awayGoals,
+            registradoEm: serverTimestamp()
+        }, { merge: true });
+
+        await recalculateRanking();
+    } catch (error) {
+        handleFirebaseError(error);
+    }
+}
+
+async function recalculateRanking() {
+    if (!state.db) return;
+
+    const [participantsSnapshot, predictionsSnapshot, resultsSnapshot] = await Promise.all([
+        getDocs(collection(state.db, "participantes")),
+        getDocs(collection(state.db, "palpites")),
+        getDocs(collection(state.db, "resultados"))
     ]);
 
-    adminEls.overviewBody.innerHTML = `
-        <div class="admin-grid">
-            <div><strong>${groupsSnap.size}</strong><div>grupos</div></div>
-            <div><strong>${participantsSnap.size}</strong><div>participantes</div></div>
-            <div><strong>${predictionsSnap.size}</strong><div>palpites</div></div>
-            <div><strong>${resultsSnap.size}</strong><div>resultados</div></div>
-        </div>
+    const participants = participantsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+    const predictions = predictionsSnapshot.docs.map((item) => item.data());
+    const results = new Map(resultsSnapshot.docs.map((item) => [Number(item.data().matchId), item.data()]));
+    const batch = writeBatch(state.db);
+
+    participants.forEach((participant) => {
+        const score = scoreParticipant(
+            predictions.filter((prediction) => prediction.participanteId === participant.id),
+            results
+        );
+
+        batch.set(doc(collection(state.db, "ranking"), participant.id), {
+            participanteId: participant.id,
+            nome: participant.nome,
+            groupId: participant.groupId || state.groupId, // Chave do grupo adicionada
+            pontos: score.pontos,
+            exatos: score.exatos,
+            vencedores: score.vencedores,
+            atualizadoEm: serverTimestamp()
+        }, { merge: true });
+    });
+
+    await batch.commit();
+    setConnection("Ranking recalculado");
+}
+
+function scoreParticipant(predictions, results) {
+    return predictions.reduce((total, prediction) => {
+        const result = results.get(Number(prediction.matchId));
+        if (!result) return total;
+
+        if (prediction.homeGoals === result.homeGoals && prediction.awayGoals === result.awayGoals) {
+            total.pontos += 3;
+            total.exatos += 1;
+            return total;
+        }
+
+        if (outcome(prediction.homeGoals, prediction.awayGoals) === outcome(result.homeGoals, result.awayGoals)) {
+            total.pontos += 1;
+            total.vencedores += 1;
+        }
+
+        return total;
+    }, { pontos: 0, exatos: 0, vencedores: 0 });
+}
+
+function renderRanking(ranking) {
+    if (!ranking.length) {
+        els.rankingBody.innerHTML = `<tr><td colspan="5" class="empty-state">Aguardando resultados.</td></tr>`;
+        return;
+    }
+
+    els.rankingBody.innerHTML = ranking.map((item, index) => `
+        <tr>
+            <td>${index + 1}</td>
+            <td>${escapeHtml(item.nome)}</td>
+            <td>${item.pontos}</td>
+            <td>${item.exatos}</td>
+            <td>${item.vencedores}</td>
+        </tr>
+    `).join("");
+}
+
+function renderResultsBoard() {
+    if (!els.resultsBoard) return;
+
+    const participants = state.participants;
+
+    if (!participants.length && !state.predictions.length) {
+        els.resultsBoard.innerHTML = `<div class="empty-results">Nenhum participante ou palpite salvo ainda.</div>`;
+        return;
+    }
+
+    const participantMap = new Map(participants.map((participant) => [participant.id, participant]));
+    const predictionsByMatch = groupPredictionsByMatch(state.predictions);
+
+    els.resultsBoard.innerHTML = matches.map((match) => {
+        const result = state.results.get(match.id);
+        const predictionsForMatch = predictionsByMatch.get(match.id) || new Map();
+        const status = result ? "Resultado oficial" : statusLabel(match.status);
+        const rows = buildPredictionRows(participants, participantMap, predictionsForMatch, result);
+
+        return `
+            <article class="result-card">
+                <header class="result-card-header">
+                    <div class="result-teams">
+                        ${flagInlineMarkup(match.homeTeam)}
+                        <strong>${escapeHtml(match.homeTeam)}</strong>
+                        <span>x</span>
+                        <strong>${escapeHtml(match.awayTeam)}</strong>
+                        ${flagInlineMarkup(match.awayTeam)}
+                    </div>
+                    <div class="result-score ${result ? "has-result" : ""}">
+                        ${result ? `${result.homeGoals} - ${result.awayGoals}` : "Aguardando"}
+                    </div>
+                    <span class="result-status">${status}</span>
+                </header>
+
+                <div class="result-meta">
+                    <span>${formatDateLabel(match.utcDate)}</span>
+                    <span>${formatTime(match.utcDate)}</span>
+                </div>
+
+                <div class="prediction-list">
+                    ${rows}
+                </div>
+            </article>
+        `;
+    }).join("");
+}
+
+function groupPredictionsByMatch(predictions) {
+    return predictions.reduce((grouped, prediction) => {
+        const matchId = Number(prediction.matchId);
+        const participantId = prediction.participanteId;
+
+        if (!grouped.has(matchId)) {
+            grouped.set(matchId, new Map());
+        }
+
+        grouped.get(matchId).set(participantId, prediction);
+        return grouped;
+    }, new Map());
+}
+
+function buildPredictionRows(participants, participantMap, predictionsForMatch, result) {
+    const participantIds = new Set([
+        ...participants.map((participant) => participant.id),
+        ...predictionsForMatch.keys()
+    ]);
+
+    if (!participantIds.size) {
+        return `<div class="prediction-row empty-row">Nenhum palpite para este jogo.</div>`;
+    }
+
+    return [...participantIds]
+        .map((participantId) => {
+            const participant = participantMap.get(participantId);
+            const prediction = predictionsForMatch.get(participantId);
+            const name = participant?.nome || prediction?.nome || participantId.split('_').pop();
+            const score = prediction ? `${prediction.homeGoals} - ${prediction.awayGoals}` : "--";
+            const points = prediction && result ? scorePrediction(prediction, result) : null;
+
+            return `
+                <div class="prediction-row">
+                    <span class="prediction-name">${escapeHtml(name)}</span>
+                    <span class="prediction-detail">
+                        <span class="prediction-score">${score}</span>
+                        ${points === null ? "" : `<span class="prediction-points points-${points}">${points} pts</span>`}
+                    </span>
+                </div>
+            `;
+        })
+        .join("");
+}
+
+function scorePrediction(prediction, result) {
+    if (prediction.homeGoals === result.homeGoals && prediction.awayGoals === result.awayGoals) {
+        return 3;
+    }
+
+    if (outcome(prediction.homeGoals, prediction.awayGoals) === outcome(result.homeGoals, result.awayGoals)) {
+        return 1;
+    }
+
+    return 0;
+}
+
+function statusLabel(status) {
+    const labels = {
+        FINISHED: "Encerrado",
+        IN_PLAY: "Ao vivo",
+        TIMED: "Aguardando"
+    };
+
+    return labels[status] || status;
+}
+
+function unlockAdmin() {
+    if (els.adminPassword.value !== ADMIN_PASSWORD) {
+        els.adminMessage.textContent = "Senha incorreta.";
+        return;
+    }
+
+    els.adminLogin.hidden = true;
+    els.adminPanel.hidden = false;
+    els.adminMessage.textContent = "";
+}
+
+function fillAdminResults() {
+    state.results.forEach((result, matchId) => {
+        const home = document.getElementById(`result-home-${matchId}`);
+        const away = document.getElementById(`result-away-${matchId}`);
+
+        if (home) home.value = result.homeGoals;
+        if (away) away.value = result.awayGoals;
+    });
+}
+
+function flagMarkup(teamName) {
+    const code = flagCodes[teamName];
+
+    if (!code) {
+        return `<span class="flag flag-fallback" aria-hidden="true">?</span>`;
+    }
+
+    return `
+        <img
+            class="flag"
+            src="https://flagcdn.com/w80/${code}.png"
+            srcset="https://flagcdn.com/w160/${code}.png 2x"
+            width="40"
+            height="30"
+            alt="Bandeira de ${escapeHtml(teamName)}"
+            loading="lazy"
+        >
     `;
 }
 
-async function loadGroups() {
-    if (!state.db || !adminEls.groupsBody) return;
-    adminEls.groupsBody.textContent = 'Carregando grupos...';
+function flagInlineMarkup(teamName) {
+    const code = flagCodes[teamName];
 
-    const snap = await getDocs(collection(state.db, 'grupos'));
-    const rows = snap.docs.map(docItem => ({ id: docItem.id, ...docItem.data() }));
-
-    adminEls.groupsBody.innerHTML = rows.map(g => `
-        <div class="admin-row" data-group-id="${escapeHtml(g.id)}">
-            <div><strong>${escapeHtml(g.nome || g.id)}</strong></div>
-            <div>${g.criadoEm ? new Date(g.criadoEm.seconds * 1000).toLocaleString() : ''}</div>
-            <div>
-                <button class="save-button compact admin-archive-group" data-id="${escapeHtml(g.id)}">Arquivar</button>
-            </div>
-        </div>
-    `).join('') || '<div class="empty-state">Nenhum grupo encontrado.</div>';
-
-    adminEls.groupsBody.querySelectorAll('.admin-archive-group').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const id = btn.dataset.id;
-            if (!confirm('Arquivar este grupo? Isso não deletará dados, apenas marcará archived=true.')) return;
-            await setDoc(doc(state.db, 'grupos', id), { archived: true }, { merge: true });
-            showAdminToast('Grupo arquivado');
-            await loadGroups();
-        });
-    });
-
-    // populate filter selects with groups
-    populateGroupFilters(rows);
-}
-
-function populateGroupFilters(groups) {
-    const opts = [{ id: '', nome: 'Todos' }, ...groups];
-    if (adminEls.participantsGroupFilter) {
-        adminEls.participantsGroupFilter.innerHTML = opts.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.nome || g.id)}</option>`).join('');
-    }
-    if (adminEls.predictionsGroupFilter) {
-        adminEls.predictionsGroupFilter.innerHTML = opts.map(g => `<option value="${escapeHtml(g.id)}">${escapeHtml(g.nome || g.id)}</option>`).join('');
-    }
-}
-
-async function loadParticipants() {
-    if (!state.db || !adminEls.participantsBody) return;
-    adminEls.participantsBody.textContent = 'Carregando participantes...';
-
-    const groupId = adminEls.participantsGroupFilter?.value || '';
-    const q = groupId ? query(collection(state.db, 'participantes'), where('groupId', '==', groupId)) : collection(state.db, 'participantes');
-    const snap = groupId ? await getDocs(q) : await getDocs(collection(state.db, 'participantes'));
-
-    const rows = (snap.docs || []).map(d => ({ id: d.id, ...d.data() }));
-
-    adminEls.participantsBody.innerHTML = rows.map(p => `
-        <div class="admin-row" data-participant-id="${escapeHtml(p.id)}">
-            <div><strong>${escapeHtml(p.nome)}</strong></div>
-            <div>${escapeHtml(p.groupId || '')}</div>
-            <div>
-                <button class="save-button compact admin-rename-participant" data-id="${escapeHtml(p.id)}">Renomear</button>
-                <button class="save-button compact admin-archive-participant" data-id="${escapeHtml(p.id)}">Arquivar</button>
-            </div>
-        </div>
-    `).join('') || '<div class="empty-state">Nenhum participante encontrado.</div>';
-
-    adminEls.participantsBody.querySelectorAll('.admin-rename-participant').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const id = btn.dataset.id;
-            const current = rows.find(r => r.id === id);
-            const newName = prompt('Novo nome do participante', current?.nome || '');
-            if (!newName) return;
-            await setDoc(doc(state.db, 'participantes', id), { nome: newName }, { merge: true });
-            showAdminToast('Participante renomeado');
-            await loadParticipants();
-        });
-    });
-
-    adminEls.participantsBody.querySelectorAll('.admin-archive-participant').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const id = btn.dataset.id;
-            if (!confirm('Arquivar este participante?')) return;
-            await setDoc(doc(state.db, 'participantes', id), { archived: true }, { merge: true });
-            showAdminToast('Participante arquivado');
-            await loadParticipants();
-        });
-    });
-}
-
-async function loadPredictions() {
-    if (!state.db || !adminEls.predictionsBody) return;
-    adminEls.predictionsBody.textContent = 'Carregando palpites...';
-
-    const groupId = adminEls.predictionsGroupFilter?.value || '';
-    let snap;
-    if (groupId) {
-        snap = await getDocs(query(collection(state.db, 'palpites'), where('groupId', '==', groupId)));
-    } else {
-        snap = await getDocs(collection(state.db, 'palpites'));
+    if (!code) {
+        return `<span class="flag-inline" aria-hidden="true">?</span>`;
     }
 
-    const rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    state.admin.predictionsCache = rows;
-
-    adminEls.predictionsBody.innerHTML = rows.map(p => `
-        <div class="admin-row" data-id="${escapeHtml(p.id)}">
-            <div><strong>${escapeHtml(p.nome || p.participanteId || p.id)}</strong></div>
-            <div>${escapeHtml(p.matchId)}</div>
-            <div>${p.homeGoals} - ${p.awayGoals}</div>
-            <div>
-                <button class="save-button compact admin-edit-prediction" data-id="${escapeHtml(p.id)}">Editar</button>
-                <button class="save-button compact admin-delete-prediction" data-id="${escapeHtml(p.id)}">Excluir</button>
-            </div>
-        </div>
-    `).join('') || '<div class="empty-state">Nenhum palpite encontrado.</div>';
-
-    adminEls.predictionsBody.querySelectorAll('.admin-edit-prediction').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const id = btn.dataset.id;
-            const row = state.admin.predictionsCache.find(r => r.id === id);
-            if (!row) return;
-            const newHome = prompt('Gols do time da casa', String(row.homeGoals ?? ''));
-            const newAway = prompt('Gols do time visitante', String(row.awayGoals ?? ''));
-            if (newHome === null || newAway === null) return;
-            const home = toScore(newHome);
-            const away = toScore(newAway);
-            if (home === null || away === null) { alert('Valores inválidos'); return; }
-            await setDoc(doc(state.db, 'palpites', id), { homeGoals: home, awayGoals: away, savedAt: serverTimestamp() }, { merge: true });
-            showAdminToast('Palpite atualizado');
-            await loadPredictions();
-        });
-    });
-
-    adminEls.predictionsBody.querySelectorAll('.admin-delete-prediction').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const id = btn.dataset.id;
-            if (!confirm('Excluir este palpite?')) return;
-            await deleteDoc(doc(state.db, 'palpites', id));
-            showAdminToast('Palpite excluído');
-            await loadPredictions();
-        });
-    });
+    return `<img class="flag-inline" src="https://flagcdn.com/w40/${code}.png" width="24" height="18" alt="Bandeira de ${escapeHtml(teamName)}" loading="lazy">`;
 }
 
-function exportPredictionsCSV() {
-    const rows = state.admin.predictionsCache || [];
-    if (!rows.length) { showAdminToast('Nenhum palpite para exportar'); return; }
+function statusBadge(status) {
+    const statusMap = {
+        FINISHED: ["finished", "ENCERRADO"],
+        IN_PLAY: ["live", "AO VIVO"],
+        TIMED: ["waiting", "AGUARDANDO"]
+    };
+    const [className, label] = statusMap[status] || ["waiting", status];
 
-    const headers = ['docId','matchId','participanteId','nome','homeGoals','awayGoals','groupId','savedAt'];
-    const csv = [headers.join(',')].concat(rows.map(r => [
-        r.id,
-        r.matchId,
-        r.participanteId,
-        `
+    return `<span class="status-badge ${className}">${label}</span>`;
+}
+
+function formatDateLabel(utcDate) {
+    const formatted = new Intl.DateTimeFormat("pt-BR", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        timeZone: "America/Sao_Paulo"
+    }).format(new Date(utcDate));
+
+    return formatted.charAt(0).toUpperCase() + formatted.slice(1);
+}
+
+function formatTime(utcDate) {
+    return new Intl.DateTimeFormat("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "America/Sao_Paulo"
+    }).format(new Date(utcDate));
+}
+
+function normalizeId(value) {
+    return value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80);
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function toScore(value) {
+    if (value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function outcome(homeGoals, awayGoals) {
+    return Math.sign(homeGoals - awayGoals);
+}
+
+function isFirebaseConfigured(config) {
+    return Boolean(config.apiKey && config.projectId && !Object.values(config).some((value) => value === "..."));
+}
+
+function setConnection(text) {
+    els.connectionStatus.textContent = text;
+}
+
+function hideLoading() {
+    els.loadingOverlay.classList.add("hidden");
+}
+
+function handleFirebaseError(error) {
+    console.error(error);
+
+    const message = friendlyFirebaseMessage(error);
+    setConnection("Erro no Firestore");
+    showPreviewMessage(message);
+}
+
+function friendlyFirebaseMessage(error) {
+    const code = error?.code || "";
+
+    if (code.includes("permission-denied")) {
+        return "O Firestore recusou a gravação. Publique as regras de desenvolvimento no Firebase Console e tente novamente.";
+    }
+
+    if (code.includes("unavailable") || code.includes("deadline-exceeded")) {
+        return "Não foi possível conectar ao Firestore agora. Verifique a conexão e tente novamente.";
+    }
+
+    if (code.includes("failed-precondition")) {
+        return "O Firestore pediu uma configuração adicional. Confira o console do navegador para ver o detalhe.";
+    }
+
+    return `Não foi possível salvar no Firestore. Detalhe: ${error?.message || "erro desconhecido"}`;
+}
+
+// EOF
