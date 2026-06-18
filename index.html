@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -169,22 +168,73 @@
             <h2>Registrar resultados</h2>
             <label for="adminPassword">Senha</label>
             <input id="adminPassword" type="password" placeholder="Senha do administrador">
-            <button id="adminUnlock" class="save-button compact" type="button">Entrar</button>
+            <div style="display:flex; gap:0.5rem; margin-top:0.6rem;">
+                <button id="adminUnlock" class="save-button compact" type="button">Entrar</button>
+                <button id="adminCancel" class="save-button compact" type="button" value="cancel">Cancelar</button>
+            </div>
             <p class="form-message" id="adminMessage"></p>
         </section>
 
         <section id="adminPanel" class="admin-panel" hidden>
-            <div class="section-heading">
-                <p class="eyebrow">Resultados oficiais</p>
-                <h2>Jogos encerrados</h2>
+            <div class="admin-header">
+                <h2>Administração</h2>
+                <div class="admin-quick">
+                    <button id="adminOverviewTab" class="admin-tab-button active" data-tab="overview">Visão geral</button>
+                    <button id="adminGroupsTab" class="admin-tab-button" data-tab="groups">Grupos</button>
+                    <button id="adminParticipantsTab" class="admin-tab-button" data-tab="participants">Participantes</button>
+                    <button id="adminPredictionsTab" class="admin-tab-button" data-tab="predictions">Palpites</button>
+                    <button id="adminResultsTab" class="admin-tab-button" data-tab="results">Resultados</button>
+                </div>
             </div>
-            <div id="adminResults" class="admin-results"></div>
-            <button id="recalculateRanking" class="save-button compact" type="button">Recalcular ranking</button>
+
+            <div class="admin-content">
+                <div id="adminOverview" class="admin-section active">
+                    <p class="eyebrow">Resumo do sistema</p>
+                    <div id="adminOverviewBody">Carregando...</div>
+                </div>
+
+                <div id="adminGroups" class="admin-section">
+                    <div class="admin-actions" style="margin-bottom:0.5rem;">
+                        <button id="adminRefreshGroups" class="save-button compact">Atualizar</button>
+                    </div>
+                    <div id="adminGroupsBody">Carregando grupos...</div>
+                </div>
+
+                <div id="adminParticipants" class="admin-section">
+                    <div class="admin-actions">
+                        <label>Filtrar por grupo</label>
+                        <select id="adminParticipantsGroupFilter"></select>
+                        <button id="adminRefreshParticipants" class="save-button compact">Atualizar</button>
+                    </div>
+                    <div id="adminParticipantsBody">Carregando participantes...</div>
+                </div>
+
+                <div id="adminPredictions" class="admin-section">
+                    <div class="admin-actions">
+                        <label>Filtrar por grupo</label>
+                        <select id="adminPredictionsGroupFilter"></select>
+                        <button id="adminExportCSV" class="save-button compact">Exportar CSV</button>
+                        <button id="adminRefreshPredictions" class="save-button compact">Atualizar</button>
+                    </div>
+                    <div id="adminPredictionsBody">Carregando palpites...</div>
+                </div>
+
+                <div id="adminResultsSection" class="admin-section">
+                    <div class="admin-actions">
+                        <button id="adminSelectAllResults" class="save-button compact">Marcar todos</button>
+                        <button id="adminPublishResults" class="save-button compact" disabled>Publicar selecionados</button>
+                        <button id="adminUndoPublish" class="save-button compact" disabled>Desfazer</button>
+                    </div>
+                    <div id="adminResultsBody">Carregando resultados...</div>
+                </div>
+            </div>
         </section>
     </dialog>
 
     <!-- Floating action button for mobile saves -->
     <button id="saveFab" class="save-fab" aria-label="Salvar palpites">↗</button>
+
+    <div id="adminToast" class="admin-toast" aria-live="polite" hidden></div>
 
     <script type="module" src="app.js"></script>
 </body>
